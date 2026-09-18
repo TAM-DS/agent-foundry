@@ -9,7 +9,7 @@ from agent_foundry.domain.deployment import (
 )
 from agent_foundry.domain.specification import Environment
 from agent_foundry.domain.evaluation import EvaluationAttempt, EvaluationPolicy
-from agent_foundry.services.approval import ApprovalNotAuthorized, ApprovalService
+from agent_foundry.services.approval import ApprovalNotAuthorized, ApprovalStore, _canonical_approval
 
 
 class DeploymentNotAuthorized(Exception):
@@ -26,22 +26,38 @@ class DeploymentBackend(Protocol):
         ...
 
 
+class DeploymentAttemptStore(Protocol):
+    def save_deployment(self, attempt: DeploymentAttempt) -> None: ...
+
+    def get_deployment(self, digest: str) -> DeploymentAttempt | None: ...
+
+
 class DeploymentService:
-    def __init__(self, backend: DeploymentBackend) -> None:
+    def __init__(
+        self, backend: DeploymentBackend, approval_store: ApprovalStore,
+        deployment_store: DeploymentAttemptStore,
+    ) -> None:
         self._backend = backend
+        self._approval_store = approval_store
+        self._deployment_store = deployment_store
 
     def deploy(
         self,
         artifact: AgentArtifact,
         policy: DeploymentPolicy,
         target_environment: Environment,
-        approval: HumanApproval | None = None,
+        approval_digest: str | None = None,
         *,
         evaluation_policy: EvaluationPolicy,
         evaluation_evidence: EvaluationAttempt,
     ) -> DeploymentAttempt:
+        if not isinstance(approval_digest, str):
+            raise DeploymentNotAuthorized("Human approval is required.")
+        approval = self._approval_store.get_approval(approval_digest)
         if not isinstance(approval, HumanApproval):
             raise DeploymentNotAuthorized("Human approval is required.")
+        if approval.digest != approval_digest:
+            raise DeploymentNotAuthorized("Approval digest does not match requested digest.")
         artifact_digest = artifact.digest
         if approval.artifact_digest != artifact_digest:
             raise DeploymentNotAuthorized("Approval does not match artifact.")
@@ -62,7 +78,7 @@ class DeploymentService:
         # Recheck the complete upstream chain, including deterministic evaluation.
         # Approver identity authentication remains external to this local slice.
         try:
-            expected_approval = ApprovalService().approve(
+            expected_approval = _canonical_approval(
                 artifact, evaluation_policy, evaluation_evidence,
                 approval.approver_id, approval.target_environment,
             )
@@ -82,7 +98,7 @@ class DeploymentService:
         else:
             outcome = DeploymentOutcome.SUCCESS
             reasons = ()
-        return DeploymentAttempt(
+        attempt = DeploymentAttempt(
             artifact_digest=artifact_digest,
             approval_digest=approval_digest,
             deployment_policy_digest=policy_digest,
@@ -90,3 +106,6 @@ class DeploymentService:
             outcome=outcome,
             reasons=reasons,
         )
+        # The backend may already have acted. Persistence failure propagates without retry.
+        self._deployment_store.save_deployment(attempt)
+        return attempt

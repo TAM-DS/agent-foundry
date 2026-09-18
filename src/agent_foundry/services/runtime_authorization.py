@@ -9,7 +9,7 @@ from agent_foundry.domain.specification import Environment
 
 
 class DeploymentEvidenceSource(Protocol):
-    def get(self, digest: str) -> DeploymentAttempt | None:
+    def get_deployment(self, digest: str) -> DeploymentAttempt | None:
         """Retrieve authoritative deployment evidence by exact digest."""
         ...
 
@@ -17,11 +17,11 @@ class DeploymentEvidenceSource(Protocol):
 class RuntimeGrantStore(Protocol):
     """Trusted issued grants; write access belongs to the issuing service."""
 
-    def save(self, grant: RuntimeGrant) -> None:
+    def save_runtime_grant(self, grant: RuntimeGrant) -> None:
         """Save a legitimately issued grant."""
         ...
 
-    def get(self, digest: str) -> RuntimeGrant | None:
+    def get_runtime_grant(self, digest: str) -> RuntimeGrant | None:
         """Retrieve an issued grant by exact digest, or None."""
         ...
 
@@ -49,7 +49,7 @@ class RuntimeAuthorizationService:
         """Grantor identity is metadata; authentication remains external."""
         if not isinstance(deployment_attempt_digest, str):
             raise RuntimeGrantNotAuthorized("Deployment attempt digest must be a string.")
-        attempt = self._evidence_source.get(deployment_attempt_digest)
+        attempt = self._evidence_source.get_deployment(deployment_attempt_digest)
         if not isinstance(attempt, DeploymentAttempt) or attempt.digest != deployment_attempt_digest:
             raise RuntimeGrantNotAuthorized("Authoritative deployment evidence is required.")
         if attempt.outcome is not DeploymentOutcome.SUCCESS:
@@ -74,5 +74,5 @@ class RuntimeAuthorizationService:
             artifact.digest, deployment_attempt_digest, policy.digest,
             target_environment, requested, grantor_id,
         )
-        self._grant_store.save(grant)
+        self._grant_store.save_runtime_grant(grant)
         return grant

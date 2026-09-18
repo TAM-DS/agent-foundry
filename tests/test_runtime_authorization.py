@@ -1,3 +1,4 @@
+from test_approval import governance_store
 from dataclasses import FrozenInstanceError, replace
 from hashlib import sha256
 import json
@@ -20,7 +21,7 @@ class FakeEvidenceSource:
     def __init__(self, *attempts):
         self.attempts = {attempt.digest: attempt for attempt in attempts}
 
-    def get(self, digest):
+    def get_deployment(self, digest):
         return self.attempts.get(digest)
 
 
@@ -29,11 +30,11 @@ class FakeGrantStore:
         self.grants = {}
         self.saved = []
 
-    def save(self, grant):
+    def save_runtime_grant(self, grant):
         self.saved.append(grant)
         self.grants[grant.digest] = grant
 
-    def get(self, digest):
+    def get_runtime_grant(self, digest):
         return self.grants.get(digest)
 
 
@@ -101,7 +102,7 @@ def test_explicit_issuance_saves_exact_narrower_canonical_grant(inputs):
     permissions.clear()
     assert grant.permissions < policy.allowed_permissions
     assert store.saved == [grant]
-    assert store.get(grant.digest) is grant
+    assert store.get_runtime_grant(grant.digest) is grant
     canonical = json.dumps({
         "artifact_digest": artifact.digest, "deployment_attempt_digest": attempt.digest,
         "runtime_policy_digest": policy.digest, "target_environment": "TEST",
@@ -125,11 +126,11 @@ def test_grant_immutable_and_digest_binds_every_field(inputs, changes):
             setattr(grant, field, value)
 
 
-def test_deployment_success_does_not_issue_grant(inputs):
+def test_deployment_success_does_not_issue_grant(inputs, governance_store):
     artifact, _, _, _, store = inputs
     evaluation_policy = EvaluationPolicy(artifact.source_specification_digest)
     evidence = EvaluationService().evaluate(artifact, evaluation_policy)
-    approval = ApprovalService().approve(artifact, evaluation_policy, evidence, "human", Environment.TEST)
+    approval = ApprovalService(governance_store).approve(artifact, evaluation_policy, evidence, "human", Environment.TEST)
 
     class Backend:
         def deploy(self, artifact, target_environment):
@@ -137,8 +138,8 @@ def test_deployment_success_does_not_issue_grant(inputs):
 
     with patch.object(RuntimeAuthorizationService, "issue", side_effect=AssertionError("implicit issuance")):
         with patch("agent_foundry.services.runtime_authorization.RuntimeGrant") as constructor:
-            attempt = DeploymentService(Backend()).deploy(
-                artifact, DeploymentPolicy({Environment.TEST}), Environment.TEST, approval,
+            attempt = DeploymentService(Backend(), governance_store, governance_store).deploy(
+                artifact, DeploymentPolicy({Environment.TEST}), Environment.TEST, approval.digest,
                 evaluation_policy=evaluation_policy, evaluation_evidence=evidence,
             )
             constructor.assert_not_called()

@@ -16,6 +16,25 @@ from agent_foundry.services.deployment import (
 from agent_foundry.services.evaluation import EvaluationService
 
 
+from test_approval import governance_store
+
+
+class ApprovalSource:
+    def __init__(self):
+        self.records = {}
+
+    def get_approval(self, digest):
+        return self.records.get(digest)
+
+    def save_approval(self, approval):
+        self.records[approval.digest] = approval
+
+
+@pytest.fixture
+def approval_store():
+    return ApprovalSource()
+
+
 class FakeBackend:
     def __init__(self, error=None):
         self.calls = []
@@ -28,11 +47,11 @@ class FakeBackend:
 
 
 @pytest.fixture
-def inputs():
+def inputs(approval_store):
     artifact = AgentArtifact("a" * 64)
     evaluation_policy = EvaluationPolicy(artifact.source_specification_digest)
     evidence = EvaluationService().evaluate(artifact, evaluation_policy)
-    approval = ApprovalService().approve(
+    approval = ApprovalService(approval_store).approve(
         artifact, evaluation_policy, evidence, "human-1", Environment.TEST,
     )
     return artifact, DeploymentPolicy({Environment.TEST, Environment.PROD}), approval, {
@@ -55,11 +74,11 @@ def test_policy_is_immutable_canonical_and_copies_input():
         policy.allowed_environments = frozenset()
 
 
-def test_success_binds_exact_inputs_and_calls_backend_once(inputs):
+def test_success_binds_exact_inputs_and_calls_backend_once(inputs, governance_store, approval_store):
     artifact, policy, approval, upstream = inputs
     backend = FakeBackend()
     assert backend.calls == []
-    attempt = DeploymentService(backend).deploy(artifact, policy, Environment.TEST, approval, **upstream)
+    attempt = DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
     assert backend.calls == [(artifact, Environment.TEST)]
     assert backend.calls[0][0] is artifact
     assert attempt.outcome is DeploymentOutcome.SUCCESS
@@ -103,19 +122,19 @@ def test_attempt_is_immutable_and_digest_binds_every_field(changes):
 
 
 @pytest.mark.parametrize("approval", [None, object(), {}, "approved"])
-def test_invalid_approval_never_calls_backend(inputs, approval):
+def test_invalid_approval_never_calls_backend(inputs, approval, governance_store, approval_store):
     artifact, policy, _, upstream = inputs
     backend = FakeBackend()
     with pytest.raises(DeploymentNotAuthorized, match="Human approval is required"):
-        DeploymentService(backend).deploy(artifact, policy, Environment.TEST, approval, **upstream)
+        DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, Environment.TEST, approval, **upstream)
     assert backend.calls == []
 
 
-def test_missing_approval_never_calls_backend(inputs):
+def test_missing_approval_never_calls_backend(inputs, governance_store, approval_store):
     artifact, policy, _, upstream = inputs
     backend = FakeBackend()
     with pytest.raises(DeploymentNotAuthorized, match="Human approval is required"):
-        DeploymentService(backend).deploy(artifact, policy, Environment.TEST, **upstream)
+        DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, Environment.TEST, **upstream)
     assert backend.calls == []
 
 
@@ -126,7 +145,7 @@ def test_missing_approval_never_calls_backend(inputs):
     ("invalid_environment", "must be an Environment"),
     ("digest", "digest does not match"),
 ])
-def test_authorization_failure_never_calls_backend(inputs, change, reason):
+def test_authorization_failure_never_calls_backend(inputs, change, reason, governance_store, approval_store):
     artifact, policy, approval, upstream = inputs
     environment = Environment.TEST
     if change == "artifact":
@@ -147,17 +166,18 @@ def test_authorization_failure_never_calls_backend(inputs, change, reason):
             approval.artifact_digest, approval.evaluation_evidence_digest,
             approval.evaluation_policy_digest, approval.approver_id, approval.target_environment,
         )
+    approval_store.save_approval(approval)
     backend = FakeBackend()
     with pytest.raises(DeploymentNotAuthorized, match=reason):
-        DeploymentService(backend).deploy(artifact, policy, environment, approval, **upstream)
+        DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, environment, approval.digest, **upstream)
     assert backend.calls == []
 
 
-def test_known_failure_is_evidence_and_later_success_preserves_it(inputs):
+def test_known_failure_is_evidence_and_later_success_preserves_it(inputs, governance_store, approval_store):
     artifact, policy, approval, upstream = inputs
     backend = FakeBackend(DeploymentBackendError("target unavailable"))
-    service = DeploymentService(backend)
-    failed = service.deploy(artifact, policy, Environment.TEST, approval, **upstream)
+    service = DeploymentService(backend, approval_store, governance_store)
+    failed = service.deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
     original = replace(failed)
     digest = failed.digest
     assert len(backend.calls) == 1
@@ -167,13 +187,13 @@ def test_known_failure_is_evidence_and_later_success_preserves_it(inputs):
     assert failed.approval_digest == approval.digest
     assert failed.deployment_policy_digest == policy.digest
     assert failed.target_environment is Environment.TEST
-    repeated = DeploymentService(FakeBackend(DeploymentBackendError("different detail"))).deploy(
-        artifact, policy, Environment.TEST, approval, **upstream,
+    repeated = DeploymentService(FakeBackend(DeploymentBackendError("different detail")), approval_store, governance_store).deploy(
+        artifact, policy, Environment.TEST, approval.digest, **upstream,
     )
     assert repeated == failed
     assert repeated.digest == digest
     backend.error = None
-    succeeded = service.deploy(artifact, policy, Environment.TEST, approval, **upstream)
+    succeeded = service.deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
     assert len(backend.calls) == 2
     assert succeeded.outcome is DeploymentOutcome.SUCCESS
     assert succeeded.digest != digest
@@ -182,12 +202,12 @@ def test_known_failure_is_evidence_and_later_success_preserves_it(inputs):
     assert failed.outcome is DeploymentOutcome.FAIL
 
 
-def test_unexpected_exception_propagates_without_retry(inputs):
+def test_unexpected_exception_propagates_without_retry(inputs, governance_store, approval_store):
     artifact, policy, approval, upstream = inputs
     error = RuntimeError("programming error")
     backend = FakeBackend(error)
     with pytest.raises(RuntimeError) as raised:
-        DeploymentService(backend).deploy(artifact, policy, Environment.TEST, approval, **upstream)
+        DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
     assert raised.value is error
     assert len(backend.calls) == 1
 
@@ -223,7 +243,7 @@ def test_attempt_rejects_invalid_field_types(changes):
     ("missing_policy", "Evaluation policy is required"),
     ("missing_evidence", "Evaluation evidence is required"),
 ])
-def test_upstream_chain_rejection_never_calls_backend(inputs, change, reason):
+def test_upstream_chain_rejection_never_calls_backend(inputs, change, reason, governance_store, approval_store):
     artifact, policy, approval, upstream = inputs
     evaluation_policy = upstream["evaluation_policy"]
     evidence = upstream["evaluation_evidence"]
@@ -262,10 +282,11 @@ def test_upstream_chain_rejection_never_calls_backend(inputs, change, reason):
             artifact.digest, evidence.digest, evaluation_policy.digest,
             "human-1", Environment.TEST,
         )
+    approval_store.save_approval(approval)
     backend = FakeBackend()
     with pytest.raises(DeploymentNotAuthorized, match=reason):
-        DeploymentService(backend).deploy(
-            artifact, policy, Environment.TEST, approval,
+        DeploymentService(backend, approval_store, governance_store).deploy(
+            artifact, policy, Environment.TEST, approval.digest,
             evaluation_policy=evaluation_policy, evaluation_evidence=evidence,
         )
     assert backend.calls == []
