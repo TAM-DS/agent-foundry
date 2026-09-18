@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from agent_foundry.domain.specification import Environment
+from agent_foundry.domain.specification import Environment, _digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,3 +22,13 @@ class HumanApproval:
                 raise TypeError(f"{field} must be a string")
         if not isinstance(self.target_environment, Environment):
             raise TypeError("target_environment must be an Environment")
+
+    @property
+    def digest(self) -> str:
+        return _digest({
+            "artifact_digest": self.artifact_digest,
+            "evaluation_evidence_digest": self.evaluation_evidence_digest,
+            "evaluation_policy_digest": self.evaluation_policy_digest,
+            "approver_id": self.approver_id,
+            "target_environment": self.target_environment.value,
+        })

@@ -99,3 +99,30 @@ def test_missing_evidence_cannot_authorize(inputs):
 def test_target_environment_requires_existing_enum(inputs):
     with pytest.raises(ApprovalNotAuthorized, match="must be an Environment"):
         ApprovalService().approve(*inputs, "human-1", "DEV")
+
+
+def test_approval_digest_is_canonical_and_deterministic(inputs):
+    from hashlib import sha256
+    import json
+
+    approval = ApprovalService().approve(*inputs, "human-é", Environment.TEST)
+    canonical = json.dumps({
+        "artifact_digest": approval.artifact_digest,
+        "evaluation_evidence_digest": approval.evaluation_evidence_digest,
+        "evaluation_policy_digest": approval.evaluation_policy_digest,
+        "approver_id": "human-é",
+        "target_environment": "TEST",
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert approval.digest == replace(approval).digest == sha256(canonical.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("changes", [
+    {"artifact_digest": "b" * 64},
+    {"evaluation_evidence_digest": "b" * 64},
+    {"evaluation_policy_digest": "b" * 64},
+    {"approver_id": "human-2"},
+    {"target_environment": Environment.PROD},
+])
+def test_approval_digest_binds_every_governed_field(inputs, changes):
+    approval = ApprovalService().approve(*inputs, "human-1", Environment.TEST)
+    assert replace(approval, **changes).digest != approval.digest
