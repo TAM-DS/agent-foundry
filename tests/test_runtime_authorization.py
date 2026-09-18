@@ -39,7 +39,7 @@ class FakeGrantStore:
 
 
 @pytest.fixture
-def inputs():
+def inputs(governance_store):
     artifact = AgentArtifact("a" * 64)
     attempt = DeploymentAttempt(
         artifact.digest, "approval", "deployment-policy", Environment.TEST,
@@ -47,6 +47,11 @@ def inputs():
     )
     policy = RuntimePolicy({Environment.TEST}, {ToolPermission("files", "read"), ToolPermission("search", "query")})
     source, store = FakeEvidenceSource(attempt), FakeGrantStore()
+    from lifecycle_support import record_state
+    from agent_foundry.domain.lifecycle import LifecycleState
+
+    record_state(governance_store, artifact.digest, LifecycleState.DEPLOYED, Environment.TEST)
+    store.lifecycle_store = governance_store
     return artifact, attempt, policy, source, store
 
 
@@ -58,7 +63,7 @@ def issue(inputs, **changes):
         grantor_id="human-é",
     )
     arguments.update(changes)
-    return RuntimeAuthorizationService(source, store).issue(**arguments)
+    return RuntimeAuthorizationService(source, store, store.lifecycle_store).issue(**arguments)
 
 
 @pytest.mark.parametrize("field", ["tool", "action"])
@@ -130,7 +135,7 @@ def test_deployment_success_does_not_issue_grant(inputs, governance_store):
     artifact, _, _, _, store = inputs
     evaluation_policy = EvaluationPolicy(artifact.source_specification_digest)
     evidence = EvaluationService().evaluate(artifact, evaluation_policy)
-    approval = ApprovalService(governance_store).approve(artifact, evaluation_policy, evidence, "human", Environment.TEST)
+    approval = ApprovalService(governance_store, governance_store).approve(artifact, evaluation_policy, evidence, "human", Environment.TEST)
 
     class Backend:
         def deploy(self, artifact, target_environment):
@@ -138,7 +143,7 @@ def test_deployment_success_does_not_issue_grant(inputs, governance_store):
 
     with patch.object(RuntimeAuthorizationService, "issue", side_effect=AssertionError("implicit issuance")):
         with patch("agent_foundry.services.runtime_authorization.RuntimeGrant") as constructor:
-            attempt = DeploymentService(Backend(), governance_store, governance_store).deploy(
+            attempt = DeploymentService(Backend(), governance_store, governance_store, governance_store).deploy(
                 artifact, DeploymentPolicy({Environment.TEST}), Environment.TEST, approval.digest,
                 evaluation_policy=evaluation_policy, evaluation_evidence=evidence,
             )

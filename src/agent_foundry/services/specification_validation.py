@@ -46,6 +46,15 @@ class ValidationEvidence:
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasons", tuple(self.reasons))
 
+    @property
+    def digest(self) -> str:
+        return _digest({
+            "specification_digest": self.specification_digest,
+            "policy_digest": self.policy_digest,
+            "outcome": self.outcome.value,
+            "reasons": self.reasons,
+        })
+
 
 class SpecificationValidationService:
     def validate(

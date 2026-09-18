@@ -2,6 +2,7 @@
 
 from typing import Protocol
 
+from agent_foundry.domain.lifecycle import LifecycleState, LifecycleStore, LifecycleTransition
 from agent_foundry.domain.approval import HumanApproval
 from agent_foundry.domain.artifact import AgentArtifact
 from agent_foundry.domain.evaluation import (
@@ -24,8 +25,9 @@ class ApprovalStore(Protocol):
 
 
 class ApprovalService:
-    def __init__(self, approval_store: ApprovalStore) -> None:
+    def __init__(self, approval_store: ApprovalStore, lifecycle_store: LifecycleStore) -> None:
         self._approval_store = approval_store
+        self._lifecycle_store = lifecycle_store
 
     def approve(
         self,
@@ -39,7 +41,12 @@ class ApprovalService:
         approval = _canonical_approval(
             artifact, policy, evidence, approver_id, target_environment,
         )
+        if self._lifecycle_store.get_lifecycle_state(artifact.digest, None) is not LifecycleState.BUILT:
+            raise ApprovalNotAuthorized("Authoritative BUILT lifecycle state is required.")
         self._approval_store.save_approval(approval)
+        self._lifecycle_store.save_lifecycle_transition(LifecycleTransition(
+            artifact.digest, LifecycleState.APPROVED, target_environment, approval.digest,
+        ))
         return approval
 
 

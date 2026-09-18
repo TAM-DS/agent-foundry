@@ -1,5 +1,6 @@
 """Construction gated by exact specification and policy evidence."""
 
+from agent_foundry.domain.lifecycle import LifecycleState, LifecycleStore, LifecycleTransition
 from agent_foundry.domain.artifact import AgentArtifact
 from agent_foundry.domain.specification import AgentSpecification
 from agent_foundry.services.specification_validation import (
@@ -15,6 +16,9 @@ class BuildNotAuthorized(Exception):
 
 
 class AgentBuildService:
+    def __init__(self, lifecycle_store: LifecycleStore) -> None:
+        self._lifecycle_store = lifecycle_store
+
     def build(
         self,
         specification: AgentSpecification,
@@ -33,4 +37,8 @@ class AgentBuildService:
         # policy so fabricated or altered evidence cannot bypass validation.
         if evidence != SpecificationValidationService().validate(specification, policy):
             raise BuildNotAuthorized("Validation evidence does not match policy evaluation.")
-        return AgentArtifact(source_specification_digest=specification.digest)
+        artifact = AgentArtifact(source_specification_digest=specification.digest)
+        self._lifecycle_store.save_lifecycle_transition(LifecycleTransition(
+            artifact.digest, LifecycleState.BUILT, None, evidence.digest,
+        ))
+        return artifact

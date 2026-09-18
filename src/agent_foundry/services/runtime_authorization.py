@@ -2,6 +2,7 @@
 
 from typing import Iterable, Protocol
 
+from agent_foundry.domain.lifecycle import LifecycleState, LifecycleStore, LifecycleTransition
 from agent_foundry.domain.artifact import AgentArtifact
 from agent_foundry.domain.deployment import DeploymentAttempt, DeploymentOutcome
 from agent_foundry.domain.runtime import RuntimeGrant, RuntimePolicy, ToolPermission, _permissions
@@ -33,9 +34,11 @@ class RuntimeGrantNotAuthorized(Exception):
 class RuntimeAuthorizationService:
     def __init__(
         self, evidence_source: DeploymentEvidenceSource, grant_store: RuntimeGrantStore,
+        lifecycle_store: LifecycleStore,
     ) -> None:
         self._evidence_source = evidence_source
         self._grant_store = grant_store
+        self._lifecycle_store = lifecycle_store
 
     def issue(
         self,
@@ -70,9 +73,15 @@ class RuntimeAuthorizationService:
             raise RuntimeGrantNotAuthorized("Requested permission is not allowed by runtime policy.")
         if not isinstance(grantor_id, str) or not grantor_id.strip():
             raise RuntimeGrantNotAuthorized("Grantor identity must be a nonblank string.")
+        state = self._lifecycle_store.get_lifecycle_state(artifact.digest, target_environment)
+        if state is None or state < LifecycleState.DEPLOYED:
+            raise RuntimeGrantNotAuthorized("At least DEPLOYED lifecycle state is required.")
         grant = RuntimeGrant(
             artifact.digest, deployment_attempt_digest, policy.digest,
             target_environment, requested, grantor_id,
         )
         self._grant_store.save_runtime_grant(grant)
+        self._lifecycle_store.save_lifecycle_transition(LifecycleTransition(
+            artifact.digest, LifecycleState.OPERATING, target_environment, grant.digest,
+        ))
         return grant

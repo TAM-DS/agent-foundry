@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import sqlite3
 
+from agent_foundry.domain.lifecycle import LifecycleState, LifecycleTransition
 from agent_foundry.domain.approval import HumanApproval
 from agent_foundry.domain.deployment import DeploymentAttempt, DeploymentOutcome
 from agent_foundry.domain.runtime import (
@@ -40,13 +41,14 @@ def _payload(record):
 
 
 class SQLiteGovernanceStore:
-    """Four explicit record APIs. Identical saves are idempotent and append-only."""
+    """Five explicit record APIs. Identical saves are idempotent and append-only."""
 
     def __init__(self, path: str | Path) -> None:
         self._connection = sqlite3.connect(path)
         try:
             with self._connection:
-                for table in ("approvals", "deployments", "runtime_grants", "tool_decisions"):
+                for table in ("approvals", "deployments", "runtime_grants", "tool_decisions",
+                              "lifecycle_transitions"):
                     self._connection.execute(
                         f"CREATE TABLE IF NOT EXISTS {table} "
                         "(digest TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)"
@@ -88,8 +90,12 @@ class SQLiteGovernanceStore:
             data = json.loads(row[0])
             if not isinstance(data, dict):
                 raise ValueError("Evidence payload must be an object")
-            data["target_environment"] = Environment(data["target_environment"])
-            if table == "approvals":
+            if table != "lifecycle_transitions" or data["target_environment"] is not None:
+                data["target_environment"] = Environment(data["target_environment"])
+            if table == "lifecycle_transitions":
+                data["state"] = LifecycleState(data["state"])
+                record = LifecycleTransition(**data)
+            elif table == "approvals":
                 record = HumanApproval(**data)
             elif table == "deployments":
                 data["outcome"] = DeploymentOutcome(data["outcome"])
@@ -140,3 +146,33 @@ class SQLiteGovernanceStore:
 
     def get_tool_decision(self, digest: str) -> ToolAuthorizationDecision | None:
         return self._read("tool_decisions", digest)
+
+    def save_lifecycle_transition(self, transition: LifecycleTransition) -> None:
+        if type(transition) is not LifecycleTransition:
+            raise TypeError("Expected canonical LifecycleTransition")
+        self._insert("lifecycle_transitions", transition.digest, _payload(transition))
+
+    def get_lifecycle_transition(self, digest: str) -> LifecycleTransition | None:
+        return self._read("lifecycle_transitions", digest)
+
+    def get_lifecycle_state(
+        self, artifact_digest: str, target_environment: Environment | None,
+    ) -> LifecycleState | None:
+        if not isinstance(artifact_digest, str) or not artifact_digest.strip():
+            raise ValueError("artifact_digest must be a nonblank string")
+        if target_environment is not None and not isinstance(target_environment, Environment):
+            raise TypeError("target_environment must be an Environment or None")
+        try:
+            digests = self._connection.execute("SELECT digest FROM lifecycle_transitions").fetchall()
+        except sqlite3.DatabaseError as error:
+            raise EvidenceIntegrityError("Cannot read lifecycle transitions") from error
+        # Verify canonical records before filtering: corrupted fields must not hide
+        # a transition from integrity checks. No mutable current-state cache exists.
+        transitions = [self.get_lifecycle_transition(row[0]) for row in digests]
+        matching = [record for record in transitions if record.artifact_digest == artifact_digest]
+        if not any(record.state is LifecycleState.BUILT for record in matching):
+            return None
+        return max(
+            (record.state for record in matching if record.target_environment is target_environment),
+            default=LifecycleState.BUILT,
+        )

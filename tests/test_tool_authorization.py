@@ -20,7 +20,7 @@ def authorized(inputs):
 
 def test_exact_issued_permission_is_allowed_and_canonical(authorized, governance_store):
     grant, policy, request, store = authorized
-    service = ToolAuthorizationService(store, governance_store)
+    service = ToolAuthorizationService(store, governance_store, store.lifecycle_store)
     decision = service.authorize(grant.digest, policy, request)
     assert decision.outcome is ToolAuthorizationOutcome.ALLOW
     assert decision.reasons == ()
@@ -72,7 +72,7 @@ def test_authority_boundaries_deny_deterministically(authorized, change, reason,
         policy = replace(policy, allowed_environments=set())
     elif change == "policy_expansion":
         policy = replace(policy, allowed_environments={Environment.TEST, Environment.PROD})
-    service = ToolAuthorizationService(store, governance_store)
+    service = ToolAuthorizationService(store, governance_store, store.lifecycle_store)
     decision = service.authorize(digest, policy, request)
     assert decision.outcome is ToolAuthorizationOutcome.DENY
     assert any(reason in entry for entry in decision.reasons)
@@ -84,12 +84,12 @@ def test_authority_boundaries_deny_deterministically(authorized, change, reason,
 def test_caller_cannot_supply_grant_object_as_authority(authorized, governance_store):
     grant, policy, request, store = authorized
     with pytest.raises(TypeError, match="digest must be a string"):
-        ToolAuthorizationService(store, governance_store).authorize(grant, policy, request)
+        ToolAuthorizationService(store, governance_store, store.lifecycle_store).authorize(grant, policy, request)
 
 
 def test_denial_survives_later_allow_as_separate_immutable_evidence(authorized, governance_store):
     grant, policy, request, store = authorized
-    service = ToolAuthorizationService(store, governance_store)
+    service = ToolAuthorizationService(store, governance_store, store.lifecycle_store)
     denied = service.authorize("not-issued", policy, request)
     original_digest = denied.digest
     allowed = service.authorize(grant.digest, policy, request)
@@ -109,7 +109,7 @@ def test_denial_survives_later_allow_as_separate_immutable_evidence(authorized, 
 ])
 def test_decision_digest_binds_every_field_and_is_immutable(authorized, changes, governance_store):
     grant, policy, request, store = authorized
-    decision = ToolAuthorizationService(store, governance_store).authorize(grant.digest, policy, request)
+    decision = ToolAuthorizationService(store, governance_store, store.lifecycle_store).authorize(grant.digest, policy, request)
     assert replace(decision, **changes).digest != decision.digest
     for field, value in changes.items():
         with pytest.raises(FrozenInstanceError):
@@ -118,7 +118,7 @@ def test_decision_digest_binds_every_field_and_is_immutable(authorized, changes,
 
 def test_decision_copies_reasons_and_request_is_immutable(authorized, governance_store):
     grant, policy, request, store = authorized
-    decision = ToolAuthorizationService(store, governance_store).authorize(grant.digest, policy, request)
+    decision = ToolAuthorizationService(store, governance_store, store.lifecycle_store).authorize(grant.digest, policy, request)
     reasons = ["denied"]
     denied = replace(decision, outcome=ToolAuthorizationOutcome.DENY, reasons=reasons)
     digest = denied.digest

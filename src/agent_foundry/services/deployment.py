@@ -2,6 +2,7 @@
 
 from typing import Protocol
 
+from agent_foundry.domain.lifecycle import LifecycleState, LifecycleStore, LifecycleTransition
 from agent_foundry.domain.approval import HumanApproval
 from agent_foundry.domain.artifact import AgentArtifact
 from agent_foundry.domain.deployment import (
@@ -35,11 +36,12 @@ class DeploymentAttemptStore(Protocol):
 class DeploymentService:
     def __init__(
         self, backend: DeploymentBackend, approval_store: ApprovalStore,
-        deployment_store: DeploymentAttemptStore,
+        deployment_store: DeploymentAttemptStore, lifecycle_store: LifecycleStore,
     ) -> None:
         self._backend = backend
         self._approval_store = approval_store
         self._deployment_store = deployment_store
+        self._lifecycle_store = lifecycle_store
 
     def deploy(
         self,
@@ -89,6 +91,9 @@ class DeploymentService:
             raise DeploymentNotAuthorized("Approval digest does not match supplied approval.")
         if approval != expected_approval:
             raise DeploymentNotAuthorized("Approval does not match canonical approval.")
+        state = self._lifecycle_store.get_lifecycle_state(artifact_digest, target_environment)
+        if state is None or state < LifecycleState.APPROVED:
+            raise DeploymentNotAuthorized("At least APPROVED lifecycle state is required.")
         policy_digest = policy.digest
         try:
             self._backend.deploy(artifact, target_environment)
@@ -108,4 +113,8 @@ class DeploymentService:
         )
         # The backend may already have acted. Persistence failure propagates without retry.
         self._deployment_store.save_deployment(attempt)
+        if outcome is DeploymentOutcome.SUCCESS:
+            self._lifecycle_store.save_lifecycle_transition(LifecycleTransition(
+                artifact_digest, LifecycleState.DEPLOYED, target_environment, attempt.digest,
+            ))
         return attempt

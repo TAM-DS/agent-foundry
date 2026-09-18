@@ -2,6 +2,7 @@
 
 from typing import Protocol
 
+from agent_foundry.domain.lifecycle import LifecycleState, LifecycleStore
 from agent_foundry.domain.runtime import (
     RuntimeGrant, RuntimePolicy, ToolAuthorizationDecision, ToolAuthorizationOutcome, ToolRequest,
 )
@@ -17,9 +18,11 @@ class ToolAuthorizationDecisionStore(Protocol):
 class ToolAuthorizationService:
     def __init__(
         self, grant_store: RuntimeGrantStore, decision_store: ToolAuthorizationDecisionStore,
+        lifecycle_store: LifecycleStore,
     ) -> None:
         self._grant_store = grant_store
         self._decision_store = decision_store
+        self._lifecycle_store = lifecycle_store
 
     def authorize(
         self, runtime_grant_digest: str, policy: RuntimePolicy, request: ToolRequest,
@@ -43,6 +46,10 @@ class ToolAuthorizationService:
             reasons.append("Environment is not allowed by runtime policy.")
         if request.permission not in policy.allowed_permissions:
             reasons.append("Requested permission is not allowed by runtime policy.")
+        if self._lifecycle_store.get_lifecycle_state(
+            request.artifact_digest, request.target_environment,
+        ) is not LifecycleState.OPERATING:
+            reasons.append("Artifact is not in OPERATING lifecycle state.")
         decision = ToolAuthorizationDecision(
             runtime_grant_digest, policy.digest, request.artifact_digest,
             request.target_environment, request.permission,

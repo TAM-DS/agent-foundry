@@ -1,3 +1,5 @@
+from lifecycle_support import record_state
+from agent_foundry.domain.lifecycle import LifecycleState, LifecycleTransition
 from dataclasses import FrozenInstanceError, replace
 import json
 import sqlite3
@@ -23,6 +25,9 @@ from agent_foundry.services.tool_authorization import ToolAuthorizationService
 
 PERMISSION = ToolPermission("files", "read")
 RECORDS = [
+    ("lifecycle_transitions", "lifecycle_transition", LifecycleTransition(
+        "a", LifecycleState.BUILT, None, "validation",
+    )),
     ("approvals", "approval", HumanApproval("a", "e", "p", "human-é", Environment.TEST)),
     ("deployments", "deployment", DeploymentAttempt(
         "a", "h", "p", Environment.TEST, DeploymentOutcome.FAIL, ("failure",),
@@ -86,7 +91,7 @@ def test_tampering_rejected_and_conflict_never_overwrites(tmp_path, table, kind,
 def test_no_mutation_or_generic_repository_api(tmp_path):
     with SQLiteGovernanceStore(tmp_path / "evidence.sqlite") as store:
         public = {name for name in dir(store) if not name.startswith("_")}
-        assert public == {"close"} | {
+        assert public == {"close", "get_lifecycle_state"} | {
             f"{operation}_{kind}" for operation in ("save", "get") for _, kind, _ in RECORDS
         }
 
@@ -119,14 +124,14 @@ def chain():
 
 def deploy(store, chain, backend, digest, deployment_store=None):
     artifact, policy, evidence = chain
-    return DeploymentService(backend, store, deployment_store or store).deploy(
+    return DeploymentService(backend, store, deployment_store or store, store).deploy(
         artifact, DeploymentPolicy({Environment.TEST}), Environment.TEST, digest,
         evaluation_policy=policy, evaluation_evidence=evidence,
     )
 
 
 def issue(store, artifact, attempt, policy, grant_store=None):
-    return RuntimeAuthorizationService(store, grant_store or store).issue(
+    return RuntimeAuthorizationService(store, grant_store or store, store).issue(
         artifact, attempt.digest, policy, Environment.TEST, {PERMISSION}, "human",
     )
 
@@ -137,7 +142,8 @@ def test_authority_and_failure_history_survive_restarts(tmp_path, chain):
     runtime_policy = RuntimePolicy({Environment.TEST}, {PERMISSION})
     backend = Backend(DeploymentBackendError("known failure"))
     with SQLiteGovernanceStore(path) as store:
-        approval = ApprovalService(store).approve(*chain, "human", Environment.TEST)
+        record_state(store, chain[0].digest)
+        approval = ApprovalService(store, store).approve(*chain, "human", Environment.TEST)
         assert store.get_approval(approval.digest) == approval
     with SQLiteGovernanceStore(path) as store:
         failed = deploy(store, chain, backend, approval.digest)
@@ -160,7 +166,7 @@ def test_authority_and_failure_history_survive_restarts(tmp_path, chain):
         assert store.get_runtime_grant(grant.digest) == grant
         request = ToolRequest(artifact.digest, Environment.TEST, PERMISSION)
         fabricated = replace(grant, grantor_id="unissued")
-        service = ToolAuthorizationService(store, store)
+        service = ToolAuthorizationService(store, store, store)
         denied = service.authorize(fabricated.digest, runtime_policy, request)
         allowed = service.authorize(grant.digest, runtime_policy, request)
         assert denied.outcome is ToolAuthorizationOutcome.DENY
@@ -203,10 +209,12 @@ class BrokenStore:
     save_tool_decision = _fail
 
 
-def test_approval_persistence_failure_prevents_issuance(chain):
+def test_approval_persistence_failure_prevents_issuance(chain, tmp_path):
     store = BrokenStore()
     with pytest.raises(OSError) as raised:
-        ApprovalService(store).approve(*chain, "human", Environment.TEST)
+        with SQLiteGovernanceStore(tmp_path / "lifecycle.sqlite") as lifecycle:
+            record_state(lifecycle, chain[0].digest)
+            ApprovalService(store, lifecycle).approve(*chain, "human", Environment.TEST)
     assert raised.value is store.error
     assert len(store.records) == 1
 
@@ -216,7 +224,8 @@ def test_deployment_evidence_failure_propagates_without_retry(tmp_path, chain, b
     broken = BrokenStore()
     backend = Backend(backend_error)
     with SQLiteGovernanceStore(tmp_path / "evidence.sqlite") as store:
-        approval = ApprovalService(store).approve(*chain, "human", Environment.TEST)
+        record_state(store, chain[0].digest)
+        approval = ApprovalService(store, store).approve(*chain, "human", Environment.TEST)
         with pytest.raises(OSError) as raised:
             deploy(store, chain, backend, approval.digest, broken)
         assert raised.value is broken.error
@@ -231,7 +240,8 @@ def test_unexpected_backend_error_propagates_without_evidence_or_retry(tmp_path,
     error = RuntimeError("unexpected")
     backend, sink = Backend(error), BrokenStore()
     with SQLiteGovernanceStore(tmp_path / "evidence.sqlite") as store:
-        approval = ApprovalService(store).approve(*chain, "human", Environment.TEST)
+        record_state(store, chain[0].digest)
+        approval = ApprovalService(store, store).approve(*chain, "human", Environment.TEST)
         with pytest.raises(RuntimeError) as raised:
             deploy(store, chain, backend, approval.digest, sink)
         assert raised.value is error
@@ -244,14 +254,15 @@ def test_grant_write_failure_is_not_issued_authority(tmp_path, chain):
     artifact = chain[0]
     policy = RuntimePolicy({Environment.TEST}, {PERMISSION})
     with SQLiteGovernanceStore(tmp_path / "evidence.sqlite") as store:
-        approval = ApprovalService(store).approve(*chain, "human", Environment.TEST)
+        record_state(store, chain[0].digest)
+        approval = ApprovalService(store, store).approve(*chain, "human", Environment.TEST)
         attempt = deploy(store, chain, Backend(), approval.digest)
         with pytest.raises(OSError) as raised:
             issue(store, artifact, attempt, policy, broken)
         assert raised.value is broken.error
         grant, = broken.records
         assert store.get_runtime_grant(grant.digest) is None
-        decision = ToolAuthorizationService(store, store).authorize(
+        decision = ToolAuthorizationService(store, store, store).authorize(
             grant.digest, policy, ToolRequest(artifact.digest, Environment.TEST, PERMISSION),
         )
         assert decision.outcome is ToolAuthorizationOutcome.DENY
@@ -262,11 +273,12 @@ def test_decision_write_failure_prevents_return(tmp_path, chain, issued):
     broken = BrokenStore()
     policy = RuntimePolicy({Environment.TEST}, {PERMISSION})
     with SQLiteGovernanceStore(tmp_path / "evidence.sqlite") as store:
-        approval = ApprovalService(store).approve(*chain, "human", Environment.TEST)
+        record_state(store, chain[0].digest)
+        approval = ApprovalService(store, store).approve(*chain, "human", Environment.TEST)
         attempt = deploy(store, chain, Backend(), approval.digest)
         grant = issue(store, chain[0], attempt, policy)
         with pytest.raises(OSError) as raised:
-            ToolAuthorizationService(store, broken).authorize(
+            ToolAuthorizationService(store, broken, store).authorize(
                 grant.digest if issued else "unknown", policy,
                 ToolRequest(chain[0].digest, Environment.TEST, PERMISSION),
             )

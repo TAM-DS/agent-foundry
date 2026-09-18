@@ -47,11 +47,11 @@ class FakeBackend:
 
 
 @pytest.fixture
-def inputs(approval_store):
+def inputs(approval_store, governance_store):
     artifact = AgentArtifact("a" * 64)
     evaluation_policy = EvaluationPolicy(artifact.source_specification_digest)
     evidence = EvaluationService().evaluate(artifact, evaluation_policy)
-    approval = ApprovalService(approval_store).approve(
+    approval = ApprovalService(approval_store, governance_store).approve(
         artifact, evaluation_policy, evidence, "human-1", Environment.TEST,
     )
     return artifact, DeploymentPolicy({Environment.TEST, Environment.PROD}), approval, {
@@ -78,7 +78,7 @@ def test_success_binds_exact_inputs_and_calls_backend_once(inputs, governance_st
     artifact, policy, approval, upstream = inputs
     backend = FakeBackend()
     assert backend.calls == []
-    attempt = DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
+    attempt = DeploymentService(backend, approval_store, governance_store, governance_store).deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
     assert backend.calls == [(artifact, Environment.TEST)]
     assert backend.calls[0][0] is artifact
     assert attempt.outcome is DeploymentOutcome.SUCCESS
@@ -126,7 +126,7 @@ def test_invalid_approval_never_calls_backend(inputs, approval, governance_store
     artifact, policy, _, upstream = inputs
     backend = FakeBackend()
     with pytest.raises(DeploymentNotAuthorized, match="Human approval is required"):
-        DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, Environment.TEST, approval, **upstream)
+        DeploymentService(backend, approval_store, governance_store, governance_store).deploy(artifact, policy, Environment.TEST, approval, **upstream)
     assert backend.calls == []
 
 
@@ -134,7 +134,7 @@ def test_missing_approval_never_calls_backend(inputs, governance_store, approval
     artifact, policy, _, upstream = inputs
     backend = FakeBackend()
     with pytest.raises(DeploymentNotAuthorized, match="Human approval is required"):
-        DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, Environment.TEST, **upstream)
+        DeploymentService(backend, approval_store, governance_store, governance_store).deploy(artifact, policy, Environment.TEST, **upstream)
     assert backend.calls == []
 
 
@@ -169,14 +169,14 @@ def test_authorization_failure_never_calls_backend(inputs, change, reason, gover
     approval_store.save_approval(approval)
     backend = FakeBackend()
     with pytest.raises(DeploymentNotAuthorized, match=reason):
-        DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, environment, approval.digest, **upstream)
+        DeploymentService(backend, approval_store, governance_store, governance_store).deploy(artifact, policy, environment, approval.digest, **upstream)
     assert backend.calls == []
 
 
 def test_known_failure_is_evidence_and_later_success_preserves_it(inputs, governance_store, approval_store):
     artifact, policy, approval, upstream = inputs
     backend = FakeBackend(DeploymentBackendError("target unavailable"))
-    service = DeploymentService(backend, approval_store, governance_store)
+    service = DeploymentService(backend, approval_store, governance_store, governance_store)
     failed = service.deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
     original = replace(failed)
     digest = failed.digest
@@ -187,7 +187,7 @@ def test_known_failure_is_evidence_and_later_success_preserves_it(inputs, govern
     assert failed.approval_digest == approval.digest
     assert failed.deployment_policy_digest == policy.digest
     assert failed.target_environment is Environment.TEST
-    repeated = DeploymentService(FakeBackend(DeploymentBackendError("different detail")), approval_store, governance_store).deploy(
+    repeated = DeploymentService(FakeBackend(DeploymentBackendError("different detail")), approval_store, governance_store, governance_store).deploy(
         artifact, policy, Environment.TEST, approval.digest, **upstream,
     )
     assert repeated == failed
@@ -207,7 +207,7 @@ def test_unexpected_exception_propagates_without_retry(inputs, governance_store,
     error = RuntimeError("programming error")
     backend = FakeBackend(error)
     with pytest.raises(RuntimeError) as raised:
-        DeploymentService(backend, approval_store, governance_store).deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
+        DeploymentService(backend, approval_store, governance_store, governance_store).deploy(artifact, policy, Environment.TEST, approval.digest, **upstream)
     assert raised.value is error
     assert len(backend.calls) == 1
 
@@ -285,7 +285,7 @@ def test_upstream_chain_rejection_never_calls_backend(inputs, change, reason, go
     approval_store.save_approval(approval)
     backend = FakeBackend()
     with pytest.raises(DeploymentNotAuthorized, match=reason):
-        DeploymentService(backend, approval_store, governance_store).deploy(
+        DeploymentService(backend, approval_store, governance_store, governance_store).deploy(
             artifact, policy, Environment.TEST, approval.digest,
             evaluation_policy=evaluation_policy, evaluation_evidence=evidence,
         )
