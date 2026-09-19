@@ -1,0 +1,48 @@
+name: Verify DEV AWS OIDC federation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify-federation:
+    environment: DEV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assume permissionless DEV role through OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::276713393004:role/agent-foundry-github-dev
+          aws-region: us-east-1
+          role-session-name: oidc-federation-proof-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Assert federated caller identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="$(aws sts get-caller-identity --output json)"
+          printf '%s\n' "$identity"
+          jq -e '
+            .Account == "276713393004" and
+            (.Arn | test("^arn:aws:sts::276713393004:assumed-role/agent-foundry-github-dev/[^/]+$"))
+          ' <<< "$identity"
+
+      - name: Assert AWS resource authority is denied
+        shell: bash
+        run: |
+          set -euo pipefail
+          error_file="$(mktemp)"
+          trap 'rm -f "$error_file"' EXIT
+          if aws s3api list-buckets > /dev/null 2> "$error_file"; then
+            echo "::error::ListBuckets unexpectedly succeeded; DEV has resource authority."
+            exit 1
+          fi
+          cat "$error_file"
+          if ! grep -q 'AccessDenied' "$error_file" || ! grep -q 'ListBuckets' "$error_file"; then
+            echo "::error::ListBuckets failed without the required AccessDenied response."
+            exit 1
+          fi
+          echo "ListBuckets was denied with AccessDenied; authentication did not grant resource authority."

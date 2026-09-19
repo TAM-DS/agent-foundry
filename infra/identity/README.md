@@ -16,8 +16,8 @@ pinned in locals, including owner ID `143246197` and repository ID `1374972009`:
 
 A different environment, a branch subject, or a subject without the matching
 environment cannot satisfy that role's trust policy. Sessions are limited to
-3600 seconds. These roles intentionally have zero deployment permissions: no
-managed policies, inline permissions policies, or policy attachments are created.
+3600 seconds. All three live roles remain permissionless: zero managed policies
+and zero inline permissions policies.
 Later slices will add bounded permissions while preserving these trust boundaries.
 
 ## Authoritative state
@@ -25,11 +25,11 @@ Later slices will add bounded permissions while preserving these trust boundarie
 S3 is the authoritative backend for identity infrastructure. State uses
 `identity/terraform.tfstate` in bucket
 `agent-foundry-terraform-state-276713393004-us-east-1` in `us-east-1`, with
-encryption and native S3 locking enabled. Identity resources have never been
-applied, so no prior identity state exists to migrate.
+encryption and native S3 locking enabled. Identity infrastructure has been applied;
+the remote Terraform state is authoritative.
 
-Configuring the backend grants no AWS deployment permissions. Inspect the
-backend diff before running `terraform init`.
+Using the S3 backend grants no AWS deployment permissions. Backend state and
+deployment authority remain separate trust boundaries.
 
 ## Local verification
 
@@ -44,10 +44,10 @@ git diff --check
 git status --short
 ```
 
-The expected plan contains exactly four creates: one OIDC provider and three IAM
-roles. Stop if any other resource appears. The provider rejects any AWS account
-other than `276713393004`. Commit `.terraform.lock.hcl` for reproducibility;
+Post-apply verification reports zero drift and no resource changes. The provider
+rejects any AWS account other than `276713393004`. Commit `.terraform.lock.hcl` for reproducibility;
 generated working data, local state, and saved plans are ignored.
 
-No `terraform apply` has been performed. Outputs contain only identity ARNs and
-exact trusted subjects.
+Outputs contain only identity ARNs and exact trusted subjects. Live GitHub OIDC
+federation has not yet been proven and will be tested separately using the manual
+DEV workflow `.github/workflows/verify-aws-oidc.yml`.
