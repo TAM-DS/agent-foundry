@@ -14,38 +14,42 @@ configuration remains present; it does not prevent out-of-band deletion.
 
 ## Verification
 
-Supply temporary SSO credentials externally through the
-`agent-foundry-admin` AWS profile. No profile or credentials are embedded in
-Terraform. Run from the repository root:
+Supply temporary SSO credentials externally through
+`AWS_PROFILE=agent-foundry-admin`. No profile or credentials are embedded in
+Terraform. For configuration-only checks, run from the repository root:
 
 ```sh
 terraform fmt -recursive
 terraform fmt -check -recursive
-AWS_PROFILE=agent-foundry-admin terraform -chdir=infra/bootstrap init -backend=false
-AWS_PROFILE=agent-foundry-admin terraform -chdir=infra/bootstrap validate
-AWS_PROFILE=agent-foundry-admin terraform -chdir=infra/bootstrap plan -no-color
 git diff --check
 git status --short
 ```
 
-For an empty state, expect 5 additions, 0 changes, and 0 destructions, all
-directly related to this bucket. There are no DynamoDB, KMS, IAM, compute,
+The authoritative S3 state contains the existing five resources directly related
+to this bucket. There are no DynamoDB, KMS, IAM, compute,
 networking, CloudWatch, application, or deployment resources.
 Validation and planning do not authorize an apply.
 
 ## Durable state boundary
 
-No backend is configured yet. Terraform therefore defaults to local state;
-`init -backend=false` does not establish remote state. This slice prepares
-the configuration and does not apply it or change `infra/identity`.
+S3 is the authoritative Terraform backend for this bucket at
+`bootstrap/terraform.tfstate` in `us-east-1`, with encryption enabled.
+The original local state was successfully migrated. Local state and backup
+files are no longer the active source of authority. Retain them only until
+remote-only verification is complete, then remove the local copies securely.
+Never commit state or credentials.
 
-A separately authorized bootstrap apply and subsequent backend configuration
-and state migration are required before identity infrastructure is applied.
-Preserve the initial bootstrap state securely until its migration to durable
-remote storage has been verified; do not rely on disposable local state for
-ongoing infrastructure authority. Never commit state or credentials.
+Independent verification confirmed that `terraform state list` returns exactly
+the existing five bootstrap resources and `terraform plan` reports:
+"No changes. Your infrastructure matches the configuration."
+AWS HeadObject succeeds for the state object in
+`agent-foundry-terraform-state-276713393004-us-east-1` at
+`bootstrap/terraform.tfstate`, confirming `AES256` encryption and an S3
+`VersionId`. Bucket versioning protects state history. No AWS resources were
+created, changed, or destroyed by the migration.
 
-Future S3 backends must enable native locking with `use_lockfile = true`.
+This S3 backend uses native S3 locking with `use_lockfile = true`.
+No DynamoDB locking is used.
 Native locking uses the existing S3 store, avoiding a separate table and its
 permissions and operational overhead. HashiCorp has deprecated DynamoDB-based
 locking. Backend access must explicitly include the necessary state-object
