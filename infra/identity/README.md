@@ -20,19 +20,28 @@ environment cannot satisfy that role's trust policy. Sessions are limited to
 managed policies, inline permissions policies, or policy attachments are created.
 Later slices will add bounded permissions while preserving these trust boundaries.
 
+## Authoritative state
+
+S3 is the authoritative backend for identity infrastructure. State uses
+`identity/terraform.tfstate` in bucket
+`agent-foundry-terraform-state-276713393004-us-east-1` in `us-east-1`, with
+encryption and native S3 locking enabled. Identity resources have never been
+applied, so no prior identity state exists to migrate.
+
+Configuring the backend grants no AWS deployment permissions. Inspect the
+backend diff before running `terraform init`.
+
 ## Local verification
 
 Invoke Terraform with temporary non-root credentials selected externally through
-the `agent-foundry-admin` AWS profile. Credentials and secrets must never enter
+`AWS_PROFILE=agent-foundry-admin`. Credentials and secrets must never enter
 Terraform configuration or tfvars. From the repository root:
 
 ```sh
 terraform fmt -recursive
 terraform fmt -check -recursive
-AWS_PROFILE=agent-foundry-admin terraform -chdir=infra/identity init -backend=false
-AWS_PROFILE=agent-foundry-admin terraform -chdir=infra/identity validate
-AWS_PROFILE=agent-foundry-admin terraform -chdir=infra/identity plan
 git diff --check
+git status --short
 ```
 
 The expected plan contains exactly four creates: one OIDC provider and three IAM
@@ -40,7 +49,5 @@ roles. Stop if any other resource appears. The provider rejects any AWS account
 other than `276713393004`. Commit `.terraform.lock.hcl` for reproducibility;
 generated working data, local state, and saved plans are ignored.
 
-No `terraform apply` has been performed for this slice. No remote backend is
-configured. State architecture will be addressed separately before consequential
-deployment infrastructure is built. Outputs contain only identity ARNs and exact
-trusted subjects.
+No `terraform apply` has been performed. Outputs contain only identity ARNs and
+exact trusted subjects.
