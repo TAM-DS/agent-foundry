@@ -49,5 +49,8 @@ rejects any AWS account other than `276713393004`. Commit `.terraform.lock.hcl` 
 generated working data, local state, and saved plans are ignored.
 
 Outputs contain only identity ARNs and exact trusted subjects. Live GitHub OIDC
-federation has not yet been proven and will be tested separately using the manual
-DEV workflow `.github/workflows/verify-aws-oidc.yml`.
+federation has been proven against the DEV environment. GitHub successfully
+assumed the permissionless DEV role through OIDC, and runtime verification
+confirmed the expected AWS account and assumed-role identity. A subsequent S3
+`ListBuckets` request was denied with `AccessDenied`, demonstrating that
+successful authentication does not grant AWS resource authority.
