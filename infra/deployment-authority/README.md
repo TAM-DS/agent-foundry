@@ -54,5 +54,12 @@ prefix. DEV has no managed policies. TEST and PROD remain without managed or
 inline permission policies. Remote Terraform state exists at
 `deployment-authority/terraform.tfstate`, and Terraform reports zero drift.
 
-A later verification slice will prove the allowed and denied boundaries through
-live GitHub OIDC.
+Live GitHub OIDC verification proved the bounded DEV authority end to end.
+The federated DEV role successfully wrote an object beneath `dev/*`, retrieved
+that exact object, and verified its contents. Attempts to write beneath `prod/*`,
+list objects in the artifact bucket, and list buckets in the AWS account were
+all denied with `AccessDenied`.
+
+The live verification demonstrates both sides of the authority boundary:
+the intended governed operation succeeds while out-of-scope operations remain
+unauthorized.
