@@ -58,7 +58,7 @@ def test_reopen_exact_record_idempotence_and_missing(tmp_path, table, kind, reco
         assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (1,)
         assert {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
-        )} == {entry[0] for entry in RECORDS}
+        )} == {entry[0] for entry in RECORDS} | {"deployment_manifests"}
 
 
 @pytest.mark.parametrize("table,kind,record", RECORDS)
@@ -91,7 +91,9 @@ def test_tampering_rejected_and_conflict_never_overwrites(tmp_path, table, kind,
 def test_no_mutation_or_generic_repository_api(tmp_path):
     with SQLiteGovernanceStore(tmp_path / "evidence.sqlite") as store:
         public = {name for name in dir(store) if not name.startswith("_")}
-        assert public == {"close", "get_lifecycle_state"} | {
+        assert public == {
+            "close", "get_lifecycle_state", "save_deployment_manifest", "get_deployment_manifest",
+        } | {
             f"{operation}_{kind}" for operation in ("save", "get") for _, kind, _ in RECORDS
         }
 

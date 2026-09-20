@@ -12,7 +12,10 @@ import sqlite3
 
 from agent_foundry.domain.lifecycle import LifecycleState, LifecycleTransition
 from agent_foundry.domain.approval import HumanApproval
-from agent_foundry.domain.deployment import DeploymentAttempt, DeploymentOutcome
+from agent_foundry.domain.artifact import AgentArtifact
+from agent_foundry.domain.deployment import DeploymentAttempt, DeploymentOutcome, DeploymentPolicy
+from agent_foundry.domain.deployment_manifest import DeploymentManifest
+from agent_foundry.domain.evaluation import EvaluationAttempt, EvaluationOutcome, EvaluationPolicy
 from agent_foundry.domain.runtime import (
     RuntimeGrant, ToolAuthorizationDecision, ToolAuthorizationOutcome, ToolPermission,
 )
@@ -31,6 +34,8 @@ def _json_default(value):
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, frozenset):
+        if all(isinstance(item, Environment) for item in value):
+            return sorted(item.value for item in value)
         return [asdict(item) for item in sorted(value, key=lambda item: (item.tool, item.action))]
     raise TypeError("Unsupported evidence value")
 
@@ -41,14 +46,14 @@ def _payload(record):
 
 
 class SQLiteGovernanceStore:
-    """Five explicit record APIs. Identical saves are idempotent and append-only."""
+    """Explicit record APIs. Identical saves are idempotent and append-only."""
 
     def __init__(self, path: str | Path) -> None:
         self._connection = sqlite3.connect(path)
         try:
             with self._connection:
                 for table in ("approvals", "deployments", "runtime_grants", "tool_decisions",
-                              "lifecycle_transitions"):
+                              "lifecycle_transitions", "deployment_manifests"):
                     self._connection.execute(
                         f"CREATE TABLE IF NOT EXISTS {table} "
                         "(digest TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)"
@@ -92,7 +97,19 @@ class SQLiteGovernanceStore:
                 raise ValueError("Evidence payload must be an object")
             if table != "lifecycle_transitions" or data["target_environment"] is not None:
                 data["target_environment"] = Environment(data["target_environment"])
-            if table == "lifecycle_transitions":
+            if table == "deployment_manifests":
+                data["artifact"] = AgentArtifact(**data["artifact"])
+                data["evaluation_policy"] = EvaluationPolicy(**data["evaluation_policy"])
+                evidence = data["evaluation_evidence"]
+                evidence["outcome"] = EvaluationOutcome(evidence["outcome"])
+                data["evaluation_evidence"] = EvaluationAttempt(**evidence)
+                policy = data["deployment_policy"]
+                policy["allowed_environments"] = frozenset(
+                    Environment(value) for value in policy["allowed_environments"]
+                )
+                data["deployment_policy"] = DeploymentPolicy(**policy)
+                record = DeploymentManifest(**data)
+            elif table == "lifecycle_transitions":
                 data["state"] = LifecycleState(data["state"])
                 record = LifecycleTransition(**data)
             elif table == "approvals":
@@ -130,6 +147,15 @@ class SQLiteGovernanceStore:
 
     def get_deployment(self, digest: str) -> DeploymentAttempt | None:
         return self._read("deployments", digest)
+
+    def save_deployment_manifest(self, manifest: DeploymentManifest) -> None:
+        if type(manifest) is not DeploymentManifest:
+            raise TypeError("Expected canonical DeploymentManifest")
+        self._insert("deployment_manifests", manifest.digest, _payload(manifest))
+
+    def get_deployment_manifest(self, digest: str) -> DeploymentManifest | None:
+        """Recover complete inputs; approval must still be fetched independently."""
+        return self._read("deployment_manifests", digest)
 
     def save_runtime_grant(self, grant: RuntimeGrant) -> None:
         if type(grant) is not RuntimeGrant:
