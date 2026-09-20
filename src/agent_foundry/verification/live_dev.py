@@ -1,7 +1,7 @@
-"""Live DEV proof; approver provenance is supplied by external authentication.
+"""Live DEV proof; approver and grantor provenance is supplied by external authentication.
 
 This application records the explicitly requested proof approval through the
-existing local approval model. It does not authenticate the human approver.
+existing local approval model. It does not authenticate the approver or grantor.
 """
 
 import argparse
@@ -14,6 +14,9 @@ from agent_foundry.composition.aws import create_dev_deployment_service
 from agent_foundry.domain.deployment import DeploymentOutcome, DeploymentPolicy
 from agent_foundry.domain.evaluation import EvaluationPolicy
 from agent_foundry.domain.lifecycle import LifecycleState
+from agent_foundry.domain.runtime import (
+    RuntimePolicy, ToolAuthorizationOutcome, ToolPermission, ToolRequest,
+)
 from agent_foundry.domain.specification import AgentSpecification, Environment
 from agent_foundry.persistence import SQLiteGovernanceStore
 from agent_foundry.services.agent_build import AgentBuildService
@@ -21,6 +24,8 @@ from agent_foundry.services.approval import ApprovalService
 from agent_foundry.services.deployment_executor import DeploymentExecutor
 from agent_foundry.services.deployment_manifest import DeploymentManifestService
 from agent_foundry.services.evaluation import EvaluationService
+from agent_foundry.services.runtime_authorization import RuntimeAuthorizationService
+from agent_foundry.services.tool_authorization import ToolAuthorizationService
 from agent_foundry.services.specification_validation import (
     SpecificationPolicy, SpecificationValidationService,
 )
@@ -51,8 +56,8 @@ def _write_manifest(path: Path, approver_id: str) -> str:
 
 
 def _execute_manifest(
-    path: Path, manifest_digest: str, *, bucket: str, region: str,
-) -> dict[str, str]:
+    path: Path, manifest_digest: str, *, bucket: str, region: str, grantor_id: str,
+) -> dict[str, object]:
     with SQLiteGovernanceStore(path) as store:
         service = create_dev_deployment_service(
             governance_store=store, bucket_name=bucket, region_name=region,
@@ -71,7 +76,60 @@ def _execute_manifest(
         lifecycle = store.get_lifecycle_state(manifest.artifact.digest, Environment.DEV)
         if lifecycle is not LifecycleState.DEPLOYED:
             raise VerificationFailed("Artifact is not DEPLOYED in DEV.")
+        read = ToolPermission("files", "read")
+        search = ToolPermission("search", "query")
+        runtime_policy = RuntimePolicy({Environment.DEV}, {read, search})
+        grant = RuntimeAuthorizationService(
+            evidence_source=store, grant_store=store, lifecycle_store=store,
+        ).issue(
+            artifact=manifest.artifact, deployment_attempt_digest=attempt.digest,
+            policy=runtime_policy, target_environment=Environment.DEV,
+            permissions={read}, grantor_id=grantor_id,
+        )
+        if (
+            store.get_runtime_grant(grant.digest) != grant
+            or grant.artifact_digest != manifest.artifact.digest
+            or grant.deployment_attempt_digest != attempt.digest
+            or grant.runtime_policy_digest != runtime_policy.digest
+            or grant.target_environment is not Environment.DEV
+            or grant.permissions != {read}
+            or grant.grantor_id != grantor_id
+        ):
+            raise VerificationFailed("Runtime grant postconditions failed.")
+        lifecycle = store.get_lifecycle_state(manifest.artifact.digest, Environment.DEV)
+        if lifecycle is not LifecycleState.OPERATING:
+            raise VerificationFailed("Artifact is not OPERATING in DEV.")
+        tools = ToolAuthorizationService(
+            grant_store=store, decision_store=store, lifecycle_store=store,
+        )
+        allowed = tools.authorize(
+            runtime_grant_digest=grant.digest, policy=runtime_policy,
+            request=ToolRequest(manifest.artifact.digest, Environment.DEV, read),
+        )
+        denied = tools.authorize(
+            runtime_grant_digest=grant.digest, policy=runtime_policy,
+            request=ToolRequest(manifest.artifact.digest, Environment.DEV, search),
+        )
+        if (
+            allowed.outcome is not ToolAuthorizationOutcome.ALLOW or allowed.reasons
+            or denied.outcome is not ToolAuthorizationOutcome.DENY
+            or denied.reasons != ("Requested permission is not explicitly granted.",)
+            or store.get_tool_decision(allowed.digest) != allowed
+            or store.get_tool_decision(denied.digest) != denied
+        ):
+            raise VerificationFailed("Tool authorization postconditions failed.")
         return {
+            "runtime_policy_digest": runtime_policy.digest,
+            "runtime_grant_digest": grant.digest,
+            "grantor_id": grant.grantor_id,
+            "granted_permissions": [
+                {"tool": permission.tool, "action": permission.action}
+                for permission in sorted(grant.permissions, key=lambda p: (p.tool, p.action))
+            ],
+            "allowed_tool_decision_digest": allowed.digest,
+            "allowed_tool_outcome": allowed.outcome.value,
+            "denied_tool_decision_digest": denied.digest,
+            "denied_tool_outcome": denied.outcome.value,
             "manifest_digest": manifest.digest,
             "artifact_digest": manifest.artifact.digest,
             "approval_digest": approval.digest,
@@ -92,7 +150,7 @@ def _nonblank(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    for name in ("bucket", "region", "approver-id"):
+    for name in ("bucket", "region", "approver-id", "grantor-id"):
         parser.add_argument(f"--{name}", required=True, type=_nonblank)
     args = parser.parse_args(argv)
     try:
@@ -101,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             manifest_digest = _write_manifest(path, args.approver_id)
             proof = _execute_manifest(
                 path, manifest_digest, bucket=args.bucket, region=args.region,
+                grantor_id=args.grantor_id,
             )
     except Exception:
         # Exception text from SDKs or credentials providers is not proof output.

@@ -73,5 +73,6 @@ jobs:
           uv run --frozen python -m agent_foundry.verification.live_dev \
             --bucket agent-foundry-deployment-artifacts-276713393004-us-east-1 \
             --region us-east-1 \
-            --approver-id "github:${GITHUB_ACTOR}"
+            --approver-id "github:${GITHUB_ACTOR}" \
+            --grantor-id "github:${GITHUB_ACTOR}"
           # Retain the content-addressed S3 object as external evidence.

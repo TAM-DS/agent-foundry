@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 import sqlite3
 from unittest.mock import Mock
@@ -9,13 +10,16 @@ from agent_foundry.adapters.s3_deployment import S3DeploymentBackend
 from agent_foundry.composition import aws
 from agent_foundry.domain.deployment import DeploymentOutcome
 from agent_foundry.domain.lifecycle import LifecycleState
+from agent_foundry.domain.runtime import ToolPermission
+from agent_foundry.services.runtime_authorization import RuntimeGrantNotAuthorized
 from agent_foundry.domain.specification import AgentSpecification, Environment
 from agent_foundry.persistence import SQLiteGovernanceStore
 from agent_foundry.verification import live_dev
 from test_s3_deployment import FakeS3Client
 
 
-ARGS = ["--bucket", "local-proof", "--region", "us-east-1", "--approver-id", "github:tester"]
+ARGS = ["--bucket", "local-proof", "--region", "us-east-1", "--approver-id", "github:tester",
+        "--grantor-id", "github:grantor"]
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +95,44 @@ def test_live_application_uses_fresh_recovery_and_real_chain(monkeypatch, capsys
 
         monkeypatch.setattr(service, method, observe)
 
+    grants, decisions, policies = [], [], []
+    issue = live_dev.RuntimeAuthorizationService.issue
+
+    def observe_issue(self, **kwargs):
+        store = stores[1]
+        assert self._evidence_source is self._grant_store is self._lifecycle_store is store
+        assert store.get_lifecycle_state(
+            kwargs["artifact"].digest, Environment.DEV,
+        ) is LifecycleState.DEPLOYED
+        assert kwargs["artifact"] is recovered[-1].artifact
+        assert kwargs["deployment_attempt_digest"] == attempts[0].digest
+        lookup = Mock(wraps=store.get_deployment)
+        monkeypatch.setattr(store, "get_deployment", lookup)
+        grant = issue(self, **kwargs)
+        lookup.assert_called_once_with(attempts[0].digest)
+        assert store.get_runtime_grant(grant.digest) == grant
+        assert store.get_lifecycle_state(grant.artifact_digest, Environment.DEV) is LifecycleState.OPERATING
+        assert grant.permissions == {ToolPermission("files", "read")}
+        assert grant.permissions < kwargs["policy"].allowed_permissions
+        assert kwargs["policy"].allowed_permissions == {
+            ToolPermission("files", "read"), ToolPermission("search", "query"),
+        }
+        grants.append(grant)
+        policies.append(kwargs["policy"])
+        return grant
+
+    authorize = live_dev.ToolAuthorizationService.authorize
+
+    def observe_authorize(self, **kwargs):
+        assert self._grant_store is self._decision_store is self._lifecycle_store is stores[1]
+        decision = authorize(self, **kwargs)
+        assert stores[1].get_tool_decision(decision.digest) == decision
+        decisions.append(decision)
+        return decision
+
+    monkeypatch.setattr(live_dev.RuntimeAuthorizationService, "issue", observe_issue)
+    monkeypatch.setattr(live_dev.ToolAuthorizationService, "authorize", observe_authorize)
+
     # Sentinels are dummy strings, never real credentials.
     secrets = {
         "AWS_ACCESS_KEY_ID": "dummy-access-key",
@@ -117,14 +159,25 @@ def test_live_application_uses_fresh_recovery_and_real_chain(monkeypatch, capsys
     assert manifest.artifact.source_specification_digest == specification.digest
     assert manifest.deployment_policy.allowed_environments == {Environment.DEV}
     assert execute_phase.call_args.args == (writer.call_args.args[0], manifest.digest)
-    assert execute_phase.call_args.kwargs == {"bucket": "local-proof", "region": "us-east-1"}
+    assert execute_phase.call_args.kwargs == {"bucket": "local-proof", "region": "us-east-1",
+                                                    "grantor_id": "github:grantor"}
     assert attempts[0].outcome is DeploymentOutcome.SUCCESS
+    assert decisions[0].reasons == ()
+    assert decisions[1].reasons == ("Requested permission is not explicitly granted.",)
     assert proof == {
+        "runtime_policy_digest": policies[0].digest,
+        "runtime_grant_digest": grants[0].digest,
+        "grantor_id": "github:grantor",
+        "granted_permissions": [{"tool": "files", "action": "read"}],
+        "allowed_tool_decision_digest": decisions[0].digest,
+        "allowed_tool_outcome": "ALLOW",
+        "denied_tool_decision_digest": decisions[1].digest,
+        "denied_tool_outcome": "DENY",
         "manifest_digest": manifest.digest,
         "artifact_digest": manifest.artifact.digest,
         "approval_digest": manifest.approval_digest,
         "deployment_attempt_digest": attempts[0].digest,
-        "outcome": "SUCCESS", "lifecycle": "DEPLOYED", "environment": "DEV",
+        "outcome": "SUCCESS", "lifecycle": "OPERATING", "environment": "DEV",
         "s3_key": f"dev/artifacts/{manifest.artifact.digest}.json",
         "approver_id": "github:tester",
     }
@@ -146,6 +199,10 @@ def test_live_application_uses_fresh_recovery_and_real_chain(monkeypatch, capsys
 
 @pytest.mark.parametrize("failure", ["put_object", "byte-mismatch"])
 def test_backend_failure_exits_unsuccessfully(monkeypatch, capsys, local_client, failure):
+    issue = Mock(side_effect=AssertionError("Runtime issuance must not run"))
+    authorize = Mock(side_effect=AssertionError("Tool proof must not run"))
+    monkeypatch.setattr(live_dev.RuntimeAuthorizationService, "issue", issue)
+    monkeypatch.setattr(live_dev.ToolAuthorizationService, "authorize", authorize)
     client, _ = local_client
     if failure == "put_object":
         client.fail_at = failure
@@ -168,6 +225,8 @@ def test_backend_failure_exits_unsuccessfully(monkeypatch, capsys, local_client,
     output = capsys.readouterr()
     assert output.out == ""
     assert "failed" in output.err and "secret-sentinel" not in output.err
+    issue.assert_not_called()
+    authorize.assert_not_called()
 
 
 def test_missing_independent_approval_blocks_s3(monkeypatch, local_client, capsys):
@@ -195,7 +254,7 @@ def test_failed_postcondition_is_not_reported_as_success(monkeypatch, capsys, mi
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize("index", [1, 3, 5])
+@pytest.mark.parametrize("index", [1, 3, 5, 7])
 @pytest.mark.parametrize("value", ["", " \n\t", None])
 def test_blank_or_missing_arguments_fail_before_client(local_client, index, value):
     args = ARGS.copy()
@@ -215,3 +274,76 @@ def test_malformed_arguments_fail_before_client(local_client, extra):
         live_dev.main(ARGS + extra)
     assert caught.value.code == 2
     local_client[1].assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["missing-authority", "grant-write"])
+def test_runtime_issuance_failure_stays_deployed(monkeypatch, capsys, failure):
+    issue = live_dev.RuntimeAuthorizationService.issue
+    authorize = Mock()
+    monkeypatch.setattr(live_dev.ToolAuthorizationService, "authorize", authorize)
+
+    def fail_issue(self, **kwargs):
+        store = self._evidence_source
+        if failure == "missing-authority":
+            monkeypatch.setattr(store, "get_deployment", lambda digest: None)
+            error = RuntimeGrantNotAuthorized
+        else:
+            monkeypatch.setattr(store, "save_runtime_grant", Mock(side_effect=RuntimeError("secret-sentinel")))
+            error = RuntimeError
+        with pytest.raises(error):
+            issue(self, **kwargs)
+        assert store.get_lifecycle_state(kwargs["artifact"].digest, Environment.DEV) is LifecycleState.DEPLOYED
+        raise RuntimeError("secret-sentinel")
+
+    monkeypatch.setattr(live_dev.RuntimeAuthorizationService, "issue", fail_issue)
+    assert live_dev.main(ARGS) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "Live DEV verification failed; no successful proof produced.\n"
+    authorize.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [
+    "grant-roundtrip", "deployment-digest", "policy-digest", "environment",
+    "permissions", "operating", "allowed-roundtrip", "denied-roundtrip",
+    "allow-outcome", "allow-reasons", "deny-outcome", "deny-reasons",
+])
+def test_runtime_postcondition_failure_suppresses_proof(monkeypatch, capsys, failure):
+    issue = live_dev.RuntimeAuthorizationService.issue
+    authorize = live_dev.ToolAuthorizationService.authorize
+
+    def corrupt_grant(self, **kwargs):
+        grant = issue(self, **kwargs)
+        changes = {
+            "deployment-digest": {"deployment_attempt_digest": "wrong"},
+            "policy-digest": {"runtime_policy_digest": "wrong"},
+            "environment": {"target_environment": Environment.PROD},
+            "permissions": {"permissions": kwargs["policy"].allowed_permissions},
+        }
+        if failure in changes:
+            grant = replace(grant, **changes[failure])
+            monkeypatch.setattr(self._grant_store, "get_runtime_grant", lambda digest: grant)
+        elif failure == "grant-roundtrip":
+            monkeypatch.setattr(self._grant_store, "get_runtime_grant", lambda digest: None)
+        elif failure == "operating":
+            monkeypatch.setattr(self._lifecycle_store, "get_lifecycle_state", lambda *args: LifecycleState.DEPLOYED)
+        return grant
+
+    def corrupt_decision(self, **kwargs):
+        decision = authorize(self, **kwargs)
+        is_allow = kwargs["request"].permission == ToolPermission("files", "read")
+        if failure == ("allowed-roundtrip" if is_allow else "denied-roundtrip"):
+            original = self._decision_store.get_tool_decision
+            monkeypatch.setattr(self._decision_store, "get_tool_decision",
+                                lambda digest: None if digest == decision.digest else original(digest))
+        if failure == ("allow-outcome" if is_allow else "deny-outcome"):
+            return replace(decision, outcome=(live_dev.ToolAuthorizationOutcome.DENY if is_allow
+                                             else live_dev.ToolAuthorizationOutcome.ALLOW))
+        if failure == ("allow-reasons" if is_allow else "deny-reasons"):
+            return replace(decision, reasons=("Wrong reason",))
+        return decision
+
+    monkeypatch.setattr(live_dev.RuntimeAuthorizationService, "issue", corrupt_grant)
+    monkeypatch.setattr(live_dev.ToolAuthorizationService, "authorize", corrupt_decision)
+    assert live_dev.main(ARGS) == 1
+    assert capsys.readouterr().out == ""
