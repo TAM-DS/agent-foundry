@@ -1,0 +1,77 @@
+name: Live governed DEV deployment
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: live-dev-deployment
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.17"
+          python-version: "3.13"
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen
+
+      - name: Run complete local test suite before federation
+        run: uv run --frozen pytest
+
+  live-proof:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    environment: DEV
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.17"
+          python-version: "3.13"
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen
+
+      - name: Assume bounded DEV role through OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::276713393004:role/agent-foundry-github-dev
+          aws-region: us-east-1
+          role-session-name: live-dev-proof-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Assert federated caller identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="$(aws sts get-caller-identity --output json)"
+          jq -e '
+            .Account == "276713393004" and
+            (.Arn | test("^arn:aws:sts::276713393004:assumed-role/agent-foundry-github-dev/[^/]+$"))
+          ' <<< "$identity"
+
+      - name: Run governed live DEV proof
+        env:
+          PYTHONPATH: src
+        run: |
+          uv run --frozen python -m agent_foundry.verification.live_dev \
+            --bucket agent-foundry-deployment-artifacts-276713393004-us-east-1 \
+            --region us-east-1 \
+            --approver-id "github:${GITHUB_ACTOR}"
+          # Retain the content-addressed S3 object as external evidence.
