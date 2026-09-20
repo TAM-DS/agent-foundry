@@ -12,7 +12,7 @@ jobs:
     environment: DEV
     runs-on: ubuntu-latest
     steps:
-      - name: Assume permissionless DEV role through OIDC
+      - name: Assume bounded DEV artifact role through OIDC
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::276713393004:role/agent-foundry-github-dev
@@ -30,14 +30,62 @@ jobs:
             (.Arn | test("^arn:aws:sts::276713393004:assumed-role/agent-foundry-github-dev/[^/]+$"))
           ' <<< "$identity"
 
-      - name: Assert AWS resource authority is denied
+      - name: Verify bounded DEV artifact authority
+        shell: bash
+        env:
+          ARTIFACT_BUCKET: agent-foundry-deployment-artifacts-276713393004-us-east-1
+          PROOF_NAME: oidc-boundary-proof-${{ github.run_id }}-${{ github.run_attempt }}.txt
+        run: |
+          set -euo pipefail
+          proof_dir="$(mktemp -d)"
+          trap 'rm -rf "$proof_dir"' EXIT
+          proof_file="$proof_dir/proof.txt"
+          downloaded_file="$proof_dir/downloaded.txt"
+          error_file="$proof_dir/error.txt"
+          dev_key="dev/verification/$PROOF_NAME"
+          prod_key="prod/verification/$PROOF_NAME"
+          printf '%s\n' 'Agent Foundry bounded DEV artifact authority proof.' > "$proof_file"
+
+          aws s3api put-object --bucket "$ARTIFACT_BUCKET" --key "$dev_key" --body "$proof_file"
+          echo "PutObject succeeded for $dev_key."
+          aws s3api get-object --bucket "$ARTIFACT_BUCKET" --key "$dev_key" "$downloaded_file"
+          if ! cmp -s "$proof_file" "$downloaded_file"; then
+            echo "::error::GetObject content does not match the uploaded proof."
+            exit 1
+          fi
+          echo "GetObject succeeded for $dev_key; proof content matches exactly."
+          # Retain the DEV object as evidence; DEV has no DeleteObject authority.
+
+          if aws s3api put-object --bucket "$ARTIFACT_BUCKET" --key "$prod_key" --body "$proof_file" > /dev/null 2> "$error_file"; then
+            echo "::error::PutObject unexpectedly succeeded for $prod_key."
+            exit 1
+          fi
+          cat "$error_file"
+          if ! grep -q 'AccessDenied' "$error_file" || ! grep -q 'PutObject' "$error_file"; then
+            echo "::error::PROD PutObject failed without the required AccessDenied response."
+            exit 1
+          fi
+          echo "PutObject to $prod_key was denied with AccessDenied."
+
+          if aws s3api list-objects-v2 --bucket "$ARTIFACT_BUCKET" > /dev/null 2> "$error_file"; then
+            echo "::error::ListObjectsV2 unexpectedly succeeded; DEV must not have ListBucket authority."
+            exit 1
+          fi
+          cat "$error_file"
+          if ! grep -q 'AccessDenied' "$error_file"; then
+            echo "::error::ListObjectsV2 failed without the required AccessDenied response."
+            exit 1
+          fi
+          echo "ListObjectsV2 was denied with AccessDenied."
+
+      - name: Assert listing all buckets is denied
         shell: bash
         run: |
           set -euo pipefail
           error_file="$(mktemp)"
           trap 'rm -f "$error_file"' EXIT
           if aws s3api list-buckets > /dev/null 2> "$error_file"; then
-            echo "::error::ListBuckets unexpectedly succeeded; DEV has resource authority."
+            echo "::error::ListBuckets unexpectedly succeeded; DEV must not have ListAllMyBuckets authority."
             exit 1
           fi
           cat "$error_file"
@@ -45,4 +93,4 @@ jobs:
             echo "::error::ListBuckets failed without the required AccessDenied response."
             exit 1
           fi
-          echo "ListBuckets was denied with AccessDenied; authentication did not grant resource authority."
+          echo "ListBuckets was denied with AccessDenied."
