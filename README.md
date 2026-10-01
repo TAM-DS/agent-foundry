@@ -795,4 +795,4 @@ Each authority must be explicit.
 
 And when the system claims that something is operating, it can show **what was built, what was evaluated, what was approved, what was deployed, what was verified, what authority was granted, and what the agent was actually allowed to do.**
 
-That is Agent Foundry.
+That is Agent Foundry and AWS
