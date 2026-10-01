@@ -1,18 +1,78 @@
 # Agent Foundry
 
-> **How do you scale AI autonomy without scaling risk at the same rate?**
+> **Governed AI agents on AWS — proving that capability, identity, and authority are different things.**
 
-Agent Foundry is a governance system for autonomous AI agents.
+Agent Foundry is a production-oriented governance system for autonomous AI agents, built in Python and proven against real AWS infrastructure.
 
-It controls how an agent moves from a request to an approved deployment, and then controls exactly what that agent is allowed to do after deployment.
+It controls how an agent moves from a request to an approved deployment, then controls exactly what that agent is allowed to do after deployment.
 
 Its central rule is simple:
 
 > **Capability is not authority.**
 
-An agent may be able to perform an action without being authorized to perform it.
+The AI layer may reason, propose, evaluate, and construct candidate work. The control layer decides whether that work may advance, what identity may act, what infrastructure may be touched, and what runtime permissions are actually issued.
 
-Agent Foundry makes that distinction explicit by separating specification, validation, construction, evaluation, approval, deployment, runtime authority, and tool permission into distinct trust boundaries — with evidence preserved at every consequential step.
+That separation is enforced through deterministic services and an intentionally small AWS footprint:
+
+- **Python 3.13** for the governance and agent-control domain
+- **AWS IAM** for bounded cloud authority
+- **GitHub OIDC → AWS** for short-lived CI/CD identity with no stored AWS access keys
+- **Amazon S3** for deployment artifacts and externally verified deployment evidence
+- **Terraform** for reproducible AWS identity, resource, and permission boundaries
+- **GitHub Actions** for sequenced validation and deployment authority
+- **boto3 / botocore** at the AWS adapter boundary
+
+The result is not “an agent running on AWS.”
+
+It is a system designed to prove a harder enterprise proposition:
+
+> **An agent can become more capable without quietly becoming more powerful.**
+
+## AWS + AI — The Architecture at a Glance
+
+```mermaid
+flowchart LR
+    subgraph CORE["Cloud-agnostic AI Governance Core"]
+        A[Agent Specification] --> B[Deterministic Validation]
+        B --> C[Agent Artifact]
+        C --> D[Evaluation Evidence]
+        D --> E[Human Approval]
+        E --> F[Frozen Deployment Manifest]
+        F --> G[Deployment Service]
+        H[Runtime Authorization] --> I[Runtime Grant]
+        I --> J[Tool Authorization]
+    end
+
+    subgraph DELIVERY["CI/CD Authority Boundary"]
+        K[GitHub Actions<br/>Validate] --> L[399 Tests Pass]
+        L --> M[GitHub OIDC<br/>Short-lived Identity]
+    end
+
+    subgraph AWS["AWS Production Boundary"]
+        M --> N[AWS IAM<br/>Bounded DEV Role]
+        N --> O[Amazon S3<br/>Deployment Artifact]
+        O --> P[Read-back Verification]
+        Q[Terraform] --> N
+        Q --> O
+    end
+
+    G --> O
+    P --> H
+    J --> R[ALLOW / DENY]
+```
+
+### Why the AWS boundary matters
+
+Agent Foundry deliberately keeps the core governance model cloud-agnostic and pushes AWS-specific concerns to the infrastructure and adapter edge.
+
+That gives the architecture two independent jobs:
+
+1. **The AI governance core decides what evidence and authority must exist.**
+2. **AWS enforces the external identity, resource, and permission boundary used to prove those decisions against real infrastructure.**
+
+The AWS implementation is intentionally narrow. There is no cloud-service bingo and no attempt to make the diagram look more sophisticated by adding services that the proof does not need.
+
+**Identity, resource existence, and authority remain separate decisions.**
 
 ---
 
@@ -176,6 +236,8 @@ dev/artifacts/195cae3e3fbc47a14cde08413049595c5adc4df70fb52ea8cd2c33375a22e300.j
 
 ## Architecture
 
+The same design can be read from two directions: the **governance lifecycle** and the **AWS enforcement boundary**.
+
 ```mermaid
 flowchart TD
     A[Agent Specification] --> B[Deterministic Validation]
@@ -183,17 +245,24 @@ flowchart TD
     C --> D[Evaluation Evidence]
     D --> E[Explicit Approval]
     E --> F[Frozen Deployment Manifest]
+
     F --> G[Deployment Executor]
     G --> H[Deployment Service]
-    H --> I[S3 Deployment Backend]
-    I --> J[AWS S3]
-    J --> K[Read-Back Verification]
-    K --> L[DEPLOYED]
 
+    subgraph AWS["AWS Enforcement Boundary"]
+        X[GitHub OIDC] --> Y[Bounded AWS IAM Role]
+        Y --> I[S3 Deployment Backend]
+        T[Terraform] --> Y
+        T --> I
+        I --> J[Amazon S3]
+        J --> K[Exact Read-back Verification]
+    end
+
+    H --> I
+    K --> L[DEPLOYED]
     L --> M[Runtime Authorization Service]
     M --> N[Bounded Runtime Grant]
     N --> O[OPERATING]
-
     O --> P[Tool Authorization Service]
     P --> Q[ALLOW]
     P --> R[DENY]
@@ -523,6 +592,27 @@ Corrupted, malformed, noncanonical, or conflicting evidence is rejected rather t
 This supports another design rule:
 
 > **Compatible data is not necessarily canonical evidence.**
+
+---
+
+## Why AWS Is Used Here
+
+AWS is not the agent framework in Agent Foundry. It is the **external enforcement and evidence boundary** used to prove that the governance model survives contact with real infrastructure.
+
+| AWS / delivery capability | Role in Agent Foundry | Architectural reason |
+| --- | --- | --- |
+| **AWS IAM** | Bounded DEV deployment authority | Makes cloud permissions explicit and testable |
+| **GitHub OIDC → AWS** | Short-lived CI/CD federation | Avoids long-lived AWS credentials in the repository |
+| **Amazon S3** | Deployment artifact boundary + read-back verification | Lets the system verify external reality before advancing lifecycle state |
+| **Terraform** | Identity, resource, and permission provisioning | Makes infrastructure authority reviewable and reproducible |
+| **GitHub Actions** | Validation → federation → live proof sequencing | Prevents cloud identity from being available before code proves itself |
+| **boto3 / botocore** | AWS adapter integration | Keeps AWS-specific implementation at the edge of the domain |
+
+The design deliberately avoids making AWS a dependency of the domain model.
+
+That is a feature, not a limitation:
+
+> **The governance rules describe what must be true. AWS provides one concrete production boundary that proves those rules can be enforced outside the process.**
 
 ---
 
