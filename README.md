@@ -2,7 +2,7 @@
 
 > **Governed AI agents on AWS — proving that capability, identity, and authority are different things.**
 
-Agent Foundry is a production-oriented governance system for autonomous AI agents, built in Python and proven against real AWS infrastructure.
+Agent Foundry is an AWS DEV governance proof for autonomous AI agents, built in Python and demonstrated against real AWS infrastructure. It is not a customer-production system.
 
 It controls how an agent moves from a request to an approved deployment, then controls exactly what that agent is allowed to do after deployment.
 
@@ -48,7 +48,7 @@ flowchart LR
         L --> M[GitHub OIDC<br/>Short-lived Identity]
     end
 
-    subgraph AWS["AWS Production Boundary"]
+    subgraph AWS["AWS DEV Proof Boundary"]
         M --> N[AWS IAM<br/>Bounded DEV Role]
         N --> O[Amazon S3<br/>Deployment Artifact]
         O --> P[Read-back Verification]
