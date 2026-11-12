@@ -28,6 +28,19 @@ It is a system designed to prove a harder enterprise proposition:
 
 > **An agent can become more capable without quietly becoming more powerful.**
 
+## Walk Through a Runtime Decision
+
+Suppose a team approves a DEV agent to read files. The runtime policy also permits search, but the approval and deployment do not themselves issue search permission. The runtime grant issued for this deployment includes only `files/read`.
+
+| Tool request | Runtime decision | Evidence to inspect |
+| --- | --- | --- |
+| `files/read` | **ALLOW** | The issued runtime grant includes this permission. |
+| `search/query` | **DENY** | Policy permits search, but the issued runtime grant omits it. |
+
+Start with the [recorded AWS DEV run](https://github.com/TAM-DS/agent-foundry/actions/runs/35525913401). Follow the frozen manifest and approval through the S3 artifact read-back, then inspect the runtime grant and the two authorization decisions. The DEV workflow verifies the deployed artifact bytes. The two decisions demonstrate the runtime authorization checks for these requests.
+
+The [tool authorization tests](tests/test_tool_authorization.py) exercise those decisions locally and verify that a later allow does not overwrite an earlier denial.
+
 ## AWS + AI — The Architecture at a Glance
 
 ```mermaid
